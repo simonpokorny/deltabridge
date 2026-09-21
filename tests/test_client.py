@@ -1,5 +1,5 @@
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from threading import Event
@@ -183,14 +183,13 @@ def test_concurrent_rebuild_keeps_latest_options(temp_delta_table_uri, mocker):
     client = DeltaTableClient(temp_delta_table_uri, lambda: dict(options))
     started = Event()
     release = Event()
-    first_table = object()
     latest_table = object()
 
     def create_table(storage_options):
         if storage_options['token'] == 'first':
             started.set()
             assert release.wait(timeout=5)
-            return first_table
+            return object()
         return latest_table
 
     mocker.patch.object(
@@ -204,10 +203,7 @@ def test_concurrent_rebuild_keeps_latest_options(temp_delta_table_uri, mocker):
             assert started.wait(timeout=5)
             options['token'] = 'latest'
             latest = executor.submit(client.load_as_delta)
-            try:
-                latest.result(timeout=1)
-            except TimeoutError:
-                pass
+            wait((latest,), timeout=1)
         finally:
             release.set()
 
