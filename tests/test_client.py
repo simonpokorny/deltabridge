@@ -80,8 +80,7 @@ def test_delta_and_polars_snapshots_survive_refresh(tmp_path):
     write_deltalake(
         tmp_path, replacement, mode='overwrite', schema_mode='overwrite'
     )
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        refreshed = executor.submit(client.load_as_delta).result(timeout=10)
+    refreshed = client.load_as_delta()
     assert refreshed is not delta_table
     assert refreshed.version() == 1
     assert delta_table.version() == 0
