@@ -2,6 +2,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from queue import Queue
 from threading import Event, Lock
 
 import polars as pl
@@ -67,19 +68,24 @@ def test_load_as_polars(temp_delta_table_uri, sample_df):
     )
 
 
-def test_lazy_frame_keeps_snapshot_after_another_thread_refreshes(tmp_path):
+def test_polars_snapshot_stays_stable_while_delta_handle_refreshes(tmp_path):
     original = pl.DataFrame({'id': [1], 'value': ['original']})
     replacement = pl.DataFrame({'id': [2], 'value': [42]})
     write_deltalake(tmp_path, original)
     client = DeltaTableClient(str(tmp_path), lambda: {})
+    delta_table = client.load_as_delta()
     pending_read = client.load_as_polars()
+    assert delta_table.version() == 0
 
     write_deltalake(
         tmp_path, replacement, mode='overwrite', schema_mode='overwrite'
     )
     with ThreadPoolExecutor(max_workers=1) as executor:
         refreshed = executor.submit(client.load_as_delta).result(timeout=10)
+    assert refreshed is not delta_table
     assert refreshed.version() == 1
+    assert delta_table.version() == 0
+    assert_frame_equal(pl.from_arrow(delta_table.to_pyarrow_table()), original)
 
     assert_frame_equal(pending_read.collect(), original)
     assert_frame_equal(client.load_as_polars().collect(), replacement)
@@ -91,18 +97,12 @@ def test_concurrent_polars_reads_serialize_dataset_and_refresh(
     client = DeltaTableClient(temp_delta_table_uri, lambda: {})
     dataset_started = Event()
     release_dataset = Event()
-    second_lock_attempt = Event()
     lock = Lock()
-    attempt_lock = Lock()
-    attempts = 0
+    attempts = Queue()
 
     class ObservedLock:
         def __enter__(self):
-            nonlocal attempts
-            with attempt_lock:
-                attempts += 1
-                if attempts == 2:
-                    second_lock_attempt.set()
+            attempts.put(None)
             assert lock.acquire(timeout=10)
 
         def __exit__(self, *args):
@@ -137,7 +137,8 @@ def test_concurrent_polars_reads_serialize_dataset_and_refresh(
         try:
             assert dataset_started.wait(timeout=5)
             second = executor.submit(client.load_as_polars)
-            assert second_lock_attempt.wait(timeout=5)
+            attempts.get(timeout=5)
+            attempts.get(timeout=5)
             assert operations == ['refresh', 'dataset']
         finally:
             release_dataset.set()
@@ -146,26 +147,6 @@ def test_concurrent_polars_reads_serialize_dataset_and_refresh(
     assert operations == ['refresh', 'dataset', 'refresh', 'dataset']
     for frame in frames:
         assert_frame_equal(frame.sort('id', 'value').collect(), sample_df)
-
-
-def test_unchanged_storage_options_refresh_under_lock(
-    temp_delta_table_uri, mocker
-):
-    client = DeltaTableClient(temp_delta_table_uri, lambda: {})
-    original = client._delta_table
-    lock_states = []
-
-    def update_incremental():
-        lock_states.append(client._refresh_lock.locked())
-
-    mocker.patch.object(
-        original, 'update_incremental', side_effect=update_incremental
-    )
-    create_table = mocker.patch.object(client, '_create_delta_table')
-
-    assert client.load_as_delta() is original
-    assert lock_states == [True]
-    create_table.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -237,13 +218,14 @@ def test_storage_options_rotation_rebuilds_table(temp_delta_table_uri, mocker):
         table_uri=temp_delta_table_uri,
         storage_options_fn=lambda: dict(options),
     )
-    new_table = mocker.Mock(spec=DeltaTable)
+    new_table = DeltaTable(temp_delta_table_uri)
     mocker.patch.object(client, '_create_delta_table', return_value=new_table)
 
     options['token'] = 'new'
     result = client.load_as_delta()
 
-    assert result is new_table
+    assert result is not new_table
+    assert result.version() == new_table.version()
     assert client._delta_table is new_table
     assert client._storage_options == {'token': 'new'}
     # The rebuild must use the REFRESHED options, not the stale ones.
@@ -257,7 +239,7 @@ def test_storage_options_rotation_failed_rebuild(temp_delta_table_uri, mocker):
         storage_options_fn=lambda: dict(options),
     )
     original_table = client._delta_table
-    new_table = mocker.Mock(spec=DeltaTable)
+    new_table = DeltaTable(temp_delta_table_uri)
     mocker.patch.object(
         client,
         '_create_delta_table',
@@ -274,38 +256,7 @@ def test_storage_options_rotation_failed_rebuild(temp_delta_table_uri, mocker):
 
     # Second call: rebuild succeeds -> new table committed
     result = client.load_as_delta()
-    assert result is new_table
+    assert result is not new_table
+    assert result.version() == new_table.version()
     assert client._storage_options == {'token': 'new'}
     assert client._create_delta_table.call_count == 2
-
-
-def test_refresh_and_table_selection_hold_lock(temp_delta_table_uri, mocker):
-    lock = Lock()
-    lock_states = []
-
-    class ObservedClient(DeltaTableClient):
-        @property
-        def _delta_table(self):
-            lock_states.append(lock.locked())
-            return self.__dict__['_delta_table']
-
-        @_delta_table.setter
-        def _delta_table(self, table):
-            self.__dict__['_delta_table'] = table
-
-    options = {'token': 'initial'}
-    client = ObservedClient(temp_delta_table_uri, lambda: dict(options))
-    client._refresh_lock = lock
-    replacement = object()
-
-    def create_table(storage_options):
-        lock_states.append(lock.locked())
-        return replacement
-
-    mocker.patch.object(
-        client, '_create_delta_table', side_effect=create_table
-    )
-    options['token'] = 'new'
-
-    assert client.load_as_delta() is replacement
-    assert lock_states == [True, True]

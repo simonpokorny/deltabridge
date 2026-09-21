@@ -22,33 +22,14 @@ uv add deltabridge
 
 ## Usage
 
-### Client reuse and concurrency
+### Concurrency and thread safety
 
-Reuse the same table client for repeated reads to retain its metadata cache.
-Each `get_table_client()` call creates a fresh instance. Each load refreshes
-the table metadata; changed storage options cause the cached table to be rebuilt.
-
-Threads can share a table client for `load_as_polars()` reads. A per-instance
-lock covers metadata refresh and creation of a PyArrow dataset with a fixed
-schema and file list. The returned LazyFrame reads that snapshot, even if a
-later load refreshes the client. Data collection runs outside the lock, so
-different reads can collect concurrently. Metadata preparation happens during
-`load_as_polars()`; reading the data remains lazy. Snapshot files must remain
-available until collection finishes, and cloud credentials must still be valid.
-
-`load_as_delta()` returns a shared, mutable `DeltaTable`, not an independent
-snapshot. Only its refresh and selection are protected. Direct use of that
-object, including writes, must not overlap other uses or loads on the same
-client without application-level synchronization. Use a dedicated client for
-such operations, or an application lock that every caller sharing the client
-and its handles observes for the entire operation.
-
-An `AzureDeltaClient` also serializes token refresh across the table clients
-created from it. These locks coordinate threads within one process; they do
-not coordinate writes to storage from other processes or applications.
-
-See the [concurrency audit](.knowledgebase/concurrency-audit.md) for tested
-scenarios, reproduced unsafe boundaries, and limits of the local test coverage.
+Both load methods can be called concurrently on the same client.
+`load_as_polars()` captures a fixed schema and file list; `load_as_delta()`
+returns a separate `DeltaTable` for each call. Do not mutate one returned
+`DeltaTable` from multiple threads without your own lock. Give each thread
+its own result instead. Snapshot files and credentials must remain available
+while reading. Azure token refresh is serialized within one `AzureDeltaClient`.
 
 ### Examples
 

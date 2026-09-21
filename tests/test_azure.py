@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from queue import Queue
 from threading import Event, Lock
 from unittest.mock import Mock
 
@@ -52,15 +53,14 @@ def test_token_client_token_expired():
 def test_concurrent_consumers_share_one_token_refresh():
     refresh_started = Event()
     release_refresh = Event()
-    second_lock_attempt = Event()
+    attempts = Queue()
 
     class ObservedLock:
         def __init__(self):
             self.lock = Lock()
 
         def __enter__(self):
-            if self.lock.locked():
-                second_lock_attempt.set()
+            attempts.put(None)
             assert self.lock.acquire(timeout=5)
 
         def __exit__(self, *_):
@@ -87,7 +87,8 @@ def test_concurrent_consumers_share_one_token_refresh():
         try:
             assert refresh_started.wait(timeout=5)
             second = executor.submit(client._get_storage_options)
-            assert second_lock_attempt.wait(timeout=2)
+            attempts.get(timeout=5)
+            attempts.get(timeout=5)
         finally:
             release_refresh.set()
 

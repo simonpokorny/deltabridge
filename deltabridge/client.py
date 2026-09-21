@@ -58,7 +58,7 @@ class DeltaTableClient:
             storage_options=storage_options,
         )
 
-    def _refresh_table(self) -> None:
+    def _refresh_table(self) -> DeltaTable:
         refreshed_storage_options = self._storage_options_fn()
         if self._storage_options != refreshed_storage_options:
             # The storage options have changed -> recreate DeltaTable instance
@@ -68,13 +68,14 @@ class DeltaTableClient:
         else:
             # Update table metadata using existing token
             self._delta_table.update_incremental()
+        return self._delta_table
 
     def load_as_delta(self) -> DeltaTable:
         """Load a Delta table.
 
-        Refresh and table selection are synchronized, but the returned object
-        is shared and mutable. Using it concurrently with another client call
-        requires external synchronization around both operations.
+        Return a new DeltaTable at the version found during refresh.
+        Later client calls do not update it. Callers must synchronize
+        concurrent use of the returned object.
 
         Returns
         -------
@@ -82,8 +83,14 @@ class DeltaTableClient:
             A DeltaTable object representing the loaded table.
         """
         with self._refresh_lock:
-            self._refresh_table()
-            return self._delta_table
+            version = self._refresh_table().version()
+            storage_options = self._storage_options.copy()
+
+        return DeltaTable(
+            self._table_uri,
+            version=version,
+            storage_options=storage_options,
+        )
 
     def load_as_polars(
         self,
@@ -120,12 +127,8 @@ class DeltaTableClient:
                 PartitionFilterOperator(operator)
 
         with self._refresh_lock:
-            self._refresh_table()
-            # scan_delta can defer dataset creation until collect(), after a
-            # concurrent refresh has changed the shared DeltaTable. Capture
-            # the dataset while its schema and file list are protected.
-            dataset = self._delta_table.to_pyarrow_dataset(
-                partitions=partition_filter or None
+            dataset = self._refresh_table().to_pyarrow_dataset(
+                partitions=partition_filter
             )
 
         return pl.scan_pyarrow_dataset(dataset)
