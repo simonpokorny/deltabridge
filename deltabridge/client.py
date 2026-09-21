@@ -72,6 +72,10 @@ class DeltaTableClient:
     def load_as_delta(self) -> DeltaTable:
         """Load a Delta table.
 
+        Refresh and table selection are synchronized, but the returned object
+        is shared and mutable. Using it concurrently with another client call
+        requires external synchronization around both operations.
+
         Returns
         -------
         DeltaTable
@@ -102,25 +106,26 @@ class DeltaTableClient:
         polars.LazyFrame
             A Polars LazyFrame representing the scanned Delta table.
             If partition filtering is applied, only matching rows
-            are included.
+            are included. Its schema and file list are captured before this
+            method returns, so subsequent client refreshes do not change it.
 
         Raises
         ------
         ValueError
             If an invalid partition filter operator is provided.
         """
-        table = self.load_as_delta()
-
-        # Check if the table is partitioned
         if partition_filter:
             for _, operator, _ in partition_filter:
                 # Raises ValueError if invalid
                 PartitionFilterOperator(operator)
-            pyarrow_options = {'partitions': partition_filter}
-        else:
-            # No partition filter for non-partitioned tables
-            pyarrow_options = {}
 
-        return pl.scan_delta(
-            source=table, use_pyarrow=True, pyarrow_options=pyarrow_options
-        )
+        with self._refresh_lock:
+            self._refresh_table()
+            # scan_delta can defer dataset creation until collect(), after a
+            # concurrent refresh has changed the shared DeltaTable. Capture
+            # the dataset while its schema and file list are protected.
+            dataset = self._delta_table.to_pyarrow_dataset(
+                partitions=partition_filter or None
+            )
+
+        return pl.scan_pyarrow_dataset(dataset)

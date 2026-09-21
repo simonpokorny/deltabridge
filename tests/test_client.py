@@ -1,7 +1,8 @@
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 
 import polars as pl
 import pytest
@@ -64,6 +65,107 @@ def test_load_as_polars(temp_delta_table_uri, sample_df):
         delta_table_client.load_as_polars().sort('id', 'value').collect(),
         sample_df,
     )
+
+
+def test_lazy_frame_keeps_snapshot_after_another_thread_refreshes(tmp_path):
+    original = pl.DataFrame({'id': [1], 'value': ['original']})
+    replacement = pl.DataFrame({'id': [2], 'value': [42]})
+    write_deltalake(tmp_path, original)
+    client = DeltaTableClient(str(tmp_path), lambda: {})
+    pending_read = client.load_as_polars()
+
+    write_deltalake(
+        tmp_path, replacement, mode='overwrite', schema_mode='overwrite'
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        refreshed = executor.submit(client.load_as_delta).result(timeout=10)
+    assert refreshed.version() == 1
+
+    assert_frame_equal(pending_read.collect(), original)
+    assert_frame_equal(client.load_as_polars().collect(), replacement)
+
+
+def test_concurrent_polars_reads_serialize_dataset_and_refresh(
+    temp_delta_table_uri, sample_df, mocker
+):
+    client = DeltaTableClient(temp_delta_table_uri, lambda: {})
+    dataset_started = Event()
+    release_dataset = Event()
+    second_lock_attempt = Event()
+    lock = Lock()
+    attempt_lock = Lock()
+    attempts = 0
+
+    class ObservedLock:
+        def __enter__(self):
+            nonlocal attempts
+            with attempt_lock:
+                attempts += 1
+                if attempts == 2:
+                    second_lock_attempt.set()
+            assert lock.acquire(timeout=10)
+
+        def __exit__(self, *args):
+            lock.release()
+
+    client._refresh_lock = ObservedLock()
+    create_dataset = client._delta_table.to_pyarrow_dataset
+    update_incremental = client._delta_table.update_incremental
+    operations = []
+
+    def refresh():
+        assert lock.locked()
+        operations.append('refresh')
+        update_incremental()
+
+    def prepare_dataset(**kwargs):
+        assert lock.locked()
+        operations.append('dataset')
+        if not dataset_started.is_set():
+            dataset_started.set()
+            assert release_dataset.wait(timeout=10)
+        return create_dataset(**kwargs)
+
+    mocker.patch.object(
+        client._delta_table, 'update_incremental', side_effect=refresh
+    )
+    mocker.patch.object(
+        client._delta_table, 'to_pyarrow_dataset', side_effect=prepare_dataset
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(client.load_as_polars)
+        try:
+            assert dataset_started.wait(timeout=5)
+            second = executor.submit(client.load_as_polars)
+            assert second_lock_attempt.wait(timeout=5)
+            assert operations == ['refresh', 'dataset']
+        finally:
+            release_dataset.set()
+        frames = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert operations == ['refresh', 'dataset', 'refresh', 'dataset']
+    for frame in frames:
+        assert_frame_equal(frame.sort('id', 'value').collect(), sample_df)
+
+
+def test_unchanged_storage_options_refresh_under_lock(
+    temp_delta_table_uri, mocker
+):
+    client = DeltaTableClient(temp_delta_table_uri, lambda: {})
+    original = client._delta_table
+    lock_states = []
+
+    def update_incremental():
+        lock_states.append(client._refresh_lock.locked())
+
+    mocker.patch.object(
+        original, 'update_incremental', side_effect=update_incremental
+    )
+    create_table = mocker.patch.object(client, '_create_delta_table')
+
+    assert client.load_as_delta() is original
+    assert lock_states == [True]
+    create_table.assert_not_called()
 
 
 @pytest.mark.parametrize(
