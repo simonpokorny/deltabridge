@@ -68,7 +68,7 @@ def test_load_as_polars(temp_delta_table_uri, sample_df):
     )
 
 
-def test_polars_snapshot_stays_stable_while_delta_handle_refreshes(tmp_path):
+def test_delta_and_polars_snapshots_survive_refresh(tmp_path):
     original = pl.DataFrame({'id': [1], 'value': ['original']})
     replacement = pl.DataFrame({'id': [2], 'value': [42]})
     write_deltalake(tmp_path, original)
@@ -91,7 +91,7 @@ def test_polars_snapshot_stays_stable_while_delta_handle_refreshes(tmp_path):
     assert_frame_equal(client.load_as_polars().collect(), replacement)
 
 
-def test_concurrent_polars_reads_serialize_dataset_and_refresh(
+def test_concurrent_loads_serialize_refresh_and_dataset(
     temp_delta_table_uri, sample_df, mocker
 ):
     client = DeltaTableClient(temp_delta_table_uri, lambda: {})
