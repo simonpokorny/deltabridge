@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from threading import Lock
 from typing import Any, Callable
 
 import polars as pl
@@ -45,6 +46,7 @@ class DeltaTableClient:
     ):
         self._table_uri = table_uri
         self._storage_options_fn = storage_options_fn
+        self._refresh_lock = Lock()
         self._storage_options = self._storage_options_fn()
         self._delta_table = self._create_delta_table(self._storage_options)
 
@@ -75,8 +77,9 @@ class DeltaTableClient:
         DeltaTable
             A DeltaTable object representing the loaded table.
         """
-        self._refresh_table()
-        return self._delta_table
+        with self._refresh_lock:
+            self._refresh_table()
+            return self._delta_table
 
     def load_as_polars(
         self,

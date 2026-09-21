@@ -1,6 +1,8 @@
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 
 import polars as pl
 import pytest
@@ -174,3 +176,43 @@ def test_storage_options_rotation_failed_rebuild(temp_delta_table_uri, mocker):
     assert result is new_table
     assert client._storage_options == {'token': 'new'}
     assert client._create_delta_table.call_count == 2
+
+
+def test_concurrent_rebuild_keeps_latest_options(temp_delta_table_uri, mocker):
+    options = {'token': 'initial'}
+    client = DeltaTableClient(temp_delta_table_uri, lambda: dict(options))
+    started = Event()
+    release = Event()
+    first_table = object()
+    latest_table = object()
+
+    def create_table(storage_options):
+        if storage_options['token'] == 'first':
+            started.set()
+            assert release.wait(timeout=5)
+            return first_table
+        return latest_table
+
+    mocker.patch.object(
+        client, '_create_delta_table', side_effect=create_table
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        options['token'] = 'first'
+        first = executor.submit(client.load_as_delta)
+        try:
+            assert started.wait(timeout=5)
+            options['token'] = 'latest'
+            latest = executor.submit(client.load_as_delta)
+            try:
+                latest.result(timeout=1)
+            except TimeoutError:
+                pass
+        finally:
+            release.set()
+
+        first.result(timeout=5)
+        latest.result(timeout=5)
+
+    assert client._storage_options == {'token': 'latest'}
+    assert client._delta_table is latest_table
