@@ -1,8 +1,7 @@
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
-from threading import Event
+from threading import Lock
 
 import polars as pl
 import pytest
@@ -178,37 +177,33 @@ def test_storage_options_rotation_failed_rebuild(temp_delta_table_uri, mocker):
     assert client._create_delta_table.call_count == 2
 
 
-def test_concurrent_rebuild_keeps_latest_options(temp_delta_table_uri, mocker):
+def test_refresh_and_table_selection_hold_lock(temp_delta_table_uri, mocker):
+    lock = Lock()
+    lock_states = []
+
+    class ObservedClient(DeltaTableClient):
+        @property
+        def _delta_table(self):
+            lock_states.append(lock.locked())
+            return self.__dict__['_delta_table']
+
+        @_delta_table.setter
+        def _delta_table(self, table):
+            self.__dict__['_delta_table'] = table
+
     options = {'token': 'initial'}
-    client = DeltaTableClient(temp_delta_table_uri, lambda: dict(options))
-    started = Event()
-    release = Event()
-    latest_table = object()
+    client = ObservedClient(temp_delta_table_uri, lambda: dict(options))
+    client._refresh_lock = lock
+    replacement = object()
 
     def create_table(storage_options):
-        if storage_options['token'] == 'first':
-            started.set()
-            assert release.wait(timeout=5)
-            return object()
-        return latest_table
+        lock_states.append(lock.locked())
+        return replacement
 
     mocker.patch.object(
         client, '_create_delta_table', side_effect=create_table
     )
+    options['token'] = 'new'
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        options['token'] = 'first'
-        first = executor.submit(client.load_as_delta)
-        try:
-            assert started.wait(timeout=5)
-            options['token'] = 'latest'
-            latest = executor.submit(client.load_as_delta)
-            wait((latest,), timeout=1)
-        finally:
-            release.set()
-
-        first.result(timeout=5)
-        latest.result(timeout=5)
-
-    assert client._storage_options == {'token': 'latest'}
-    assert client._delta_table is latest_table
+    assert client.load_as_delta() is replacement
+    assert lock_states == [True, True]
