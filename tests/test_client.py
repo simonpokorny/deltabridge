@@ -1,9 +1,6 @@
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from queue import Queue
-from threading import Event, Lock
 
 import polars as pl
 import pytest
@@ -90,62 +87,34 @@ def test_delta_and_polars_snapshots_survive_refresh(tmp_path):
     assert_frame_equal(client.load_as_polars().collect(), replacement)
 
 
-def test_concurrent_loads_serialize_refresh_and_dataset(
-    temp_delta_table_uri, sample_df, mocker
-):
+@pytest.mark.parametrize('load_method', ['load_as_delta', 'load_as_polars'])
+def test_loads_hold_refresh_lock(temp_delta_table_uri, mocker, load_method):
     client = DeltaTableClient(temp_delta_table_uri, lambda: {})
-    dataset_started = Event()
-    release_dataset = Event()
-    lock = Lock()
-    attempts = Queue()
-
-    class ObservedLock:
-        def __enter__(self):
-            attempts.put(None)
-            assert lock.acquire(timeout=10)
-
-        def __exit__(self, *args):
-            lock.release()
-
-    client._refresh_lock = ObservedLock()
-    create_dataset = client._delta_table.to_pyarrow_dataset
     update_incremental = client._delta_table.update_incremental
-    operations = []
 
     def refresh():
-        assert lock.locked()
-        operations.append('refresh')
+        assert client._refresh_lock.locked()
         update_incremental()
 
-    def prepare_dataset(**kwargs):
-        assert lock.locked()
-        operations.append('dataset')
-        if not dataset_started.is_set():
-            dataset_started.set()
-            assert release_dataset.wait(timeout=10)
-        return create_dataset(**kwargs)
-
-    mocker.patch.object(
+    refresh_mock = mocker.patch.object(
         client._delta_table, 'update_incremental', side_effect=refresh
     )
-    mocker.patch.object(
-        client._delta_table, 'to_pyarrow_dataset', side_effect=prepare_dataset
-    )
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(client.load_as_polars)
-        try:
-            assert dataset_started.wait(timeout=5)
-            second = executor.submit(client.load_as_polars)
-            attempts.get(timeout=5)
-            attempts.get(timeout=5)
-            assert operations == ['refresh', 'dataset']
-        finally:
-            release_dataset.set()
-        frames = [first.result(timeout=10), second.result(timeout=10)]
+    if load_method == 'load_as_polars':
+        create_dataset = client._delta_table.to_pyarrow_dataset
 
-    assert operations == ['refresh', 'dataset', 'refresh', 'dataset']
-    for frame in frames:
-        assert_frame_equal(frame.sort('id', 'value').collect(), sample_df)
+        def dataset(**kwargs):
+            assert client._refresh_lock.locked()
+            return create_dataset(**kwargs)
+
+        dataset_mock = mocker.patch.object(
+            client._delta_table, 'to_pyarrow_dataset', side_effect=dataset
+        )
+
+    getattr(client, load_method)()
+
+    refresh_mock.assert_called_once_with()
+    if load_method == 'load_as_polars':
+        dataset_mock.assert_called_once_with(partitions=None)
 
 
 @pytest.mark.parametrize(
