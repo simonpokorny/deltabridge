@@ -53,26 +53,26 @@ def test_load_as_delta(temp_delta_table_uri):
     )
 
 
-def test_load_as_delta_reuses_cache_after_append(
+def test_load_as_delta_and_polars_after_append(
     temp_delta_table_uri, sample_df
 ):
     appended = sample_df.with_columns(pl.col('id') + 10)
     client = DeltaTableClient(temp_delta_table_uri, lambda: {})
 
-    table = client.load_as_delta()
-    pending_read = client.load_as_polars()
-    assert table.version() == 0
-    assert client.load_as_delta() is table
+    delta_table = client.load_as_delta()
+    polars_table = client.load_as_polars()
+    assert delta_table.version() == 0
+    assert client.load_as_delta() is delta_table
 
     write_deltalake(temp_delta_table_uri, appended, mode='append')
-    assert client.load_as_delta() is table
-    assert table.version() == 1
+    assert client.load_as_delta() is delta_table
+    assert delta_table.version() == 1
     assert_frame_equal(
-        pl.from_arrow(table.to_pyarrow_table()).sort('id', 'value'),
+        pl.from_arrow(delta_table.to_pyarrow_table()).sort('id', 'value'),
         pl.concat([sample_df, appended]).sort('id', 'value'),
     )
     assert_frame_equal(
-        pending_read.sort('id', 'value').collect(),
+        polars_table.sort('id', 'value').collect(),
         sample_df.sort('id', 'value'),
     )
 
