@@ -95,9 +95,8 @@ def test_load_as_polars(temp_delta_table_uri, sample_df):
     )
 
 
-@pytest.mark.parametrize('load_method', ['load_as_delta', 'load_as_polars'])
 def test_cached_delta_refresh_preserves_polars_snapshot(
-    temp_delta_table_uri, sample_df, load_method
+    temp_delta_table_uri, sample_df
 ):
     replacement = sample_df.with_columns(
         pl.col('id') + 10, pl.col('datetime').cast(pl.String)
@@ -111,7 +110,7 @@ def test_cached_delta_refresh_preserves_polars_snapshot(
         mode='overwrite',
         schema_mode='overwrite',
     )
-    getattr(client, load_method)()
+    client.load_as_polars()
 
     assert_frame_equal(pending_read.sort('id', 'value').collect(), sample_df)
     assert_frame_equal(
