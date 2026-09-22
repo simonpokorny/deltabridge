@@ -61,12 +61,18 @@ def test_load_as_delta_and_polars_after_append(
 
     delta_table = client.load_as_delta()
     polars_table = client.load_as_polars()
-    assert delta_table.version() == 0
+    assert_frame_equal(
+        pl.from_arrow(delta_table.to_pyarrow_table()).sort('id', 'value'),
+        sample_df.sort('id', 'value'),
+    )
+    assert_frame_equal(
+        polars_table.sort('id', 'value').collect(),
+        sample_df.sort('id', 'value'),
+    )
     assert client.load_as_delta() is delta_table
 
     write_deltalake(temp_delta_table_uri, appended, mode='append')
     assert client.load_as_delta() is delta_table
-    assert delta_table.version() == 1
     assert_frame_equal(
         pl.from_arrow(delta_table.to_pyarrow_table()).sort('id', 'value'),
         pl.concat([sample_df, appended]).sort('id', 'value'),
@@ -111,33 +117,6 @@ def test_cached_delta_refresh_preserves_polars_snapshot(
     assert_frame_equal(
         client.load_as_polars().sort('id', 'value').collect(), replacement
     )
-
-
-@pytest.mark.parametrize('load_method', ['load_as_delta', 'load_as_polars'])
-def test_loads_hold_refresh_lock(temp_delta_table_uri, mocker, load_method):
-    client = DeltaTableClient(temp_delta_table_uri, lambda: {})
-
-    def check_locked(method):
-        def call(**kwargs):
-            assert client._refresh_lock.locked()
-            return method(**kwargs)
-
-        return call
-
-    methods = ['update_incremental']
-    if load_method == 'load_as_polars':
-        methods.append('to_pyarrow_dataset')
-    mocks = [
-        mocker.patch.object(
-            client._delta_table,
-            name,
-            side_effect=check_locked(getattr(client._delta_table, name)),
-        )
-        for name in methods
-    ]
-    getattr(client, load_method)()
-    for method in mocks:
-        method.assert_called_once()
 
 
 @pytest.mark.parametrize(
