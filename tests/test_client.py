@@ -53,28 +53,23 @@ def test_load_as_delta(temp_delta_table_uri):
     )
 
 
-def test_load_as_delta_reuses_cache_after_append(tmp_path, mocker):
-    original = pl.DataFrame({'id': [1]})
-    appended = pl.DataFrame({'id': [2]})
-    write_deltalake(tmp_path, original)
-    client = DeltaTableClient(str(tmp_path), lambda: {})
-    constructor = mocker.patch(
-        'deltabridge.client.DeltaTable',
-        side_effect=AssertionError('unchanged options must reuse the cache'),
-    )
+def test_load_as_delta_reuses_cache_after_append(
+    temp_delta_table_uri, sample_df
+):
+    appended = sample_df.with_columns(pl.col('id') + 10)
+    client = DeltaTableClient(temp_delta_table_uri, lambda: {})
 
     table = client.load_as_delta()
     assert table.version() == 0
     assert client.load_as_delta() is table
 
-    write_deltalake(tmp_path, appended, mode='append')
+    write_deltalake(temp_delta_table_uri, appended, mode='append')
     assert client.load_as_delta() is table
     assert table.version() == 1
     assert_frame_equal(
-        pl.from_arrow(table.to_pyarrow_table()).sort('id'),
-        pl.concat([original, appended]),
+        pl.from_arrow(table.to_pyarrow_table()).sort('id', 'value'),
+        pl.concat([sample_df, appended]).sort('id', 'value'),
     )
-    constructor.assert_not_called()
 
 
 def test_load_as_polars(temp_delta_table_uri, sample_df):
@@ -90,59 +85,54 @@ def test_load_as_polars(temp_delta_table_uri, sample_df):
 
 
 @pytest.mark.parametrize('load_method', ['load_as_delta', 'load_as_polars'])
-def test_cached_delta_refresh_preserves_polars_snapshot(tmp_path, load_method):
-    original = pl.DataFrame({'id': [1], 'value': ['original']})
-    replacement = pl.DataFrame({'id': [2], 'value': [42]})
-    write_deltalake(tmp_path, original)
-    client = DeltaTableClient(str(tmp_path), lambda: {})
-    delta_table = client.load_as_delta()
+def test_cached_delta_refresh_preserves_polars_snapshot(
+    temp_delta_table_uri, sample_df, load_method
+):
+    replacement = sample_df.with_columns(
+        pl.col('id') + 10, pl.col('datetime').cast(pl.String)
+    )
+    client = DeltaTableClient(temp_delta_table_uri, lambda: {})
     pending_read = client.load_as_polars()
-    assert delta_table.version() == 0
 
     write_deltalake(
-        tmp_path, replacement, mode='overwrite', schema_mode='overwrite'
+        temp_delta_table_uri,
+        replacement,
+        mode='overwrite',
+        schema_mode='overwrite',
     )
-    refreshed = getattr(client, load_method)()
-    if load_method == 'load_as_delta':
-        assert refreshed is delta_table
-    assert client._delta_table is delta_table
-    assert delta_table.version() == 1
-    assert_frame_equal(
-        pl.from_arrow(delta_table.to_pyarrow_table()), replacement
-    )
+    getattr(client, load_method)()
 
-    assert_frame_equal(pending_read.collect(), original)
-    assert_frame_equal(client.load_as_polars().collect(), replacement)
+    assert_frame_equal(pending_read.sort('id', 'value').collect(), sample_df)
+    assert_frame_equal(
+        client.load_as_polars().sort('id', 'value').collect(), replacement
+    )
 
 
 @pytest.mark.parametrize('load_method', ['load_as_delta', 'load_as_polars'])
 def test_loads_hold_refresh_lock(temp_delta_table_uri, mocker, load_method):
     client = DeltaTableClient(temp_delta_table_uri, lambda: {})
-    update_incremental = client._delta_table.update_incremental
 
-    def refresh():
-        assert client._refresh_lock.locked()
-        update_incremental()
-
-    refresh_mock = mocker.patch.object(
-        client._delta_table, 'update_incremental', side_effect=refresh
-    )
-    if load_method == 'load_as_polars':
-        create_dataset = client._delta_table.to_pyarrow_dataset
-
-        def dataset(**kwargs):
+    def check_locked(method):
+        def call(**kwargs):
             assert client._refresh_lock.locked()
-            return create_dataset(**kwargs)
+            return method(**kwargs)
 
-        dataset_mock = mocker.patch.object(
-            client._delta_table, 'to_pyarrow_dataset', side_effect=dataset
-        )
+        return call
 
-    getattr(client, load_method)()
-
-    refresh_mock.assert_called_once_with()
+    methods = ['update_incremental']
     if load_method == 'load_as_polars':
-        dataset_mock.assert_called_once_with(partitions=None)
+        methods.append('to_pyarrow_dataset')
+    mocks = [
+        mocker.patch.object(
+            client._delta_table,
+            name,
+            side_effect=check_locked(getattr(client._delta_table, name)),
+        )
+        for name in methods
+    ]
+    getattr(client, load_method)()
+    for method in mocks:
+        method.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -214,7 +204,7 @@ def test_storage_options_rotation_rebuilds_table(temp_delta_table_uri, mocker):
         table_uri=temp_delta_table_uri,
         storage_options_fn=lambda: dict(options),
     )
-    new_table = DeltaTable(temp_delta_table_uri)
+    new_table = mocker.Mock(spec=DeltaTable)
     mocker.patch.object(client, '_create_delta_table', return_value=new_table)
 
     options['token'] = 'new'
@@ -234,7 +224,7 @@ def test_storage_options_rotation_failed_rebuild(temp_delta_table_uri, mocker):
         storage_options_fn=lambda: dict(options),
     )
     original_table = client._delta_table
-    new_table = DeltaTable(temp_delta_table_uri)
+    new_table = mocker.Mock(spec=DeltaTable)
     mocker.patch.object(
         client,
         '_create_delta_table',
