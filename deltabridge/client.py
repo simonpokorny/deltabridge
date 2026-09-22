@@ -72,14 +72,8 @@ class DeltaTableClient:
     def load_as_delta(self) -> DeltaTable:
         """Load a Delta table.
 
-        Return the cached DeltaTable to preserve incremental transaction-log
-        loading. Subsequent client loads may update it in place. Storage option
-        changes replace the cached instance. The returned table is not
-        thread-safe for concurrent use without external synchronization.
-        The internal refresh lock does not protect subsequent use.
-        Callers must use an external lock to synchronize the entire use of
-        the returned object with client loads and other direct table access
-        or mutations.
+        Return the cached DeltaTable.
+        Concurrent use requires external synchronization.
 
         Returns
         -------
