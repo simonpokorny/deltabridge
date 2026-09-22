@@ -69,10 +69,12 @@ def test_load_as_delta_and_polars_after_append(
         polars_table.sort('id', 'value').collect(),
         sample_df.sort('id', 'value'),
     )
-    assert client.load_as_delta() is delta_table
+    refreshed_delta_table = client.load_as_delta()
+    assert refreshed_delta_table is delta_table
 
     write_deltalake(temp_delta_table_uri, appended, mode='append')
-    assert client.load_as_delta() is delta_table
+    refreshed_delta_table = client.load_as_delta()
+    assert refreshed_delta_table is delta_table
     assert_frame_equal(
         pl.from_arrow(delta_table.to_pyarrow_table()).sort('id', 'value'),
         pl.concat([sample_df, appended]).sort('id', 'value'),
