@@ -24,12 +24,11 @@ uv add deltabridge
 
 ### Concurrency and thread safety
 
-Both load methods can be called concurrently on the same client.
-`load_as_polars()` captures a fixed schema and file list; `load_as_delta()`
-returns a separate `DeltaTable` for each call. Do not mutate one returned
-`DeltaTable` from multiple threads without your own lock. Give each thread
-its own result instead. Snapshot files and credentials must remain available
-while reading. Azure token refresh is serialized within one `AzureDeltaClient`.
+* `load_as_polars()` supports concurrent reads on the same client. Each call
+  captures a snapshot that later refreshes do not change.
+* `load_as_delta()` returns a shared, cached table to preserve incremental
+  loading. Using it concurrently with client loads or other table access
+  requires external synchronization.
 
 ### Examples
 

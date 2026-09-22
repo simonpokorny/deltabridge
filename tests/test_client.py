@@ -53,6 +53,30 @@ def test_load_as_delta(temp_delta_table_uri):
     )
 
 
+def test_load_as_delta_reuses_cache_after_append(tmp_path, mocker):
+    original = pl.DataFrame({'id': [1]})
+    appended = pl.DataFrame({'id': [2]})
+    write_deltalake(tmp_path, original)
+    client = DeltaTableClient(str(tmp_path), lambda: {})
+    constructor = mocker.patch(
+        'deltabridge.client.DeltaTable',
+        side_effect=AssertionError('unchanged options must reuse the cache'),
+    )
+
+    table = client.load_as_delta()
+    assert table.version() == 0
+    assert client.load_as_delta() is table
+
+    write_deltalake(tmp_path, appended, mode='append')
+    assert client.load_as_delta() is table
+    assert table.version() == 1
+    assert_frame_equal(
+        pl.from_arrow(table.to_pyarrow_table()).sort('id'),
+        pl.concat([original, appended]),
+    )
+    constructor.assert_not_called()
+
+
 def test_load_as_polars(temp_delta_table_uri, sample_df):
     delta_table_client = DeltaTableClient(
         table_uri=temp_delta_table_uri,
@@ -65,7 +89,8 @@ def test_load_as_polars(temp_delta_table_uri, sample_df):
     )
 
 
-def test_delta_and_polars_snapshots_survive_refresh(tmp_path):
+@pytest.mark.parametrize('load_method', ['load_as_delta', 'load_as_polars'])
+def test_cached_delta_refresh_preserves_polars_snapshot(tmp_path, load_method):
     original = pl.DataFrame({'id': [1], 'value': ['original']})
     replacement = pl.DataFrame({'id': [2], 'value': [42]})
     write_deltalake(tmp_path, original)
@@ -77,11 +102,14 @@ def test_delta_and_polars_snapshots_survive_refresh(tmp_path):
     write_deltalake(
         tmp_path, replacement, mode='overwrite', schema_mode='overwrite'
     )
-    refreshed = client.load_as_delta()
-    assert refreshed is not delta_table
-    assert refreshed.version() == 1
-    assert delta_table.version() == 0
-    assert_frame_equal(pl.from_arrow(delta_table.to_pyarrow_table()), original)
+    refreshed = getattr(client, load_method)()
+    if load_method == 'load_as_delta':
+        assert refreshed is delta_table
+    assert client._delta_table is delta_table
+    assert delta_table.version() == 1
+    assert_frame_equal(
+        pl.from_arrow(delta_table.to_pyarrow_table()), replacement
+    )
 
     assert_frame_equal(pending_read.collect(), original)
     assert_frame_equal(client.load_as_polars().collect(), replacement)
@@ -192,8 +220,7 @@ def test_storage_options_rotation_rebuilds_table(temp_delta_table_uri, mocker):
     options['token'] = 'new'
     result = client.load_as_delta()
 
-    assert result is not new_table
-    assert result.version() == new_table.version()
+    assert result is new_table
     assert client._delta_table is new_table
     assert client._storage_options == {'token': 'new'}
     # The rebuild must use the REFRESHED options, not the stale ones.
@@ -224,7 +251,6 @@ def test_storage_options_rotation_failed_rebuild(temp_delta_table_uri, mocker):
 
     # Second call: rebuild succeeds -> new table committed
     result = client.load_as_delta()
-    assert result is not new_table
-    assert result.version() == new_table.version()
+    assert result is new_table
     assert client._storage_options == {'token': 'new'}
     assert client._create_delta_table.call_count == 2
