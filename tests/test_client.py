@@ -60,6 +60,7 @@ def test_load_as_delta_reuses_cache_after_append(
     client = DeltaTableClient(temp_delta_table_uri, lambda: {})
 
     table = client.load_as_delta()
+    pending_read = client.load_as_polars()
     assert table.version() == 0
     assert client.load_as_delta() is table
 
@@ -69,6 +70,10 @@ def test_load_as_delta_reuses_cache_after_append(
     assert_frame_equal(
         pl.from_arrow(table.to_pyarrow_table()).sort('id', 'value'),
         pl.concat([sample_df, appended]).sort('id', 'value'),
+    )
+    assert_frame_equal(
+        pending_read.sort('id', 'value').collect(),
+        sample_df.sort('id', 'value'),
     )
 
 

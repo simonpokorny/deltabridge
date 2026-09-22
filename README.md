@@ -24,11 +24,17 @@ uv add deltabridge
 
 ### Concurrency and thread safety
 
-* `load_as_polars()` supports concurrent reads on the same client. Each call
-  captures a snapshot that later refreshes do not change.
-* `load_as_delta()` returns a shared, cached table to preserve incremental
-  loading. Using it concurrently with client loads or other table access
-  requires external synchronization.
+Both methods refresh the cached Delta table before returning.
+
+* `load_as_polars()` supports concurrent reads on the same client. It captures
+  the current schema and file list before returning a LazyFrame, which reads
+  those files on `collect()`. Later client loads capture a refreshed snapshot
+  without changing previously returned LazyFrames.
+* `load_as_delta()` returns the shared, cached DeltaTable to preserve incremental
+  transaction-log loading. Calling it in every request refreshes the metadata
+  but does not create an independent snapshot: another request can update the
+  same object while it is in use. Concurrent use requires a shared external
+  lock covering both client loads and the entire use of the returned table.
 
 ### Examples
 
