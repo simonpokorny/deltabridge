@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from threading import Lock
 
 from azure.core.credentials import AccessToken, TokenCredential
 from azure.identity import ChainedTokenCredential, DefaultAzureCredential
@@ -25,7 +24,6 @@ class AzureDeltaClient(BaseDeltaClient):
         credential: TokenCredential | ChainedTokenCredential | None = None,
     ):
         self._credential = credential or DefaultAzureCredential()
-        self._token_lock = Lock()
         self._token_obj = self._get_token()
 
     def _get_token(self) -> AccessToken:
@@ -38,6 +36,5 @@ class AzureDeltaClient(BaseDeltaClient):
 
     def _get_storage_options(self) -> dict[str, str]:
         """Get the storage options for the Delta table."""
-        with self._token_lock:
-            self._refresh_token()
-            return {'azure_storage_token': self._token_obj.token}
+        self._refresh_token()
+        return {'azure_storage_token': self._token_obj.token}
