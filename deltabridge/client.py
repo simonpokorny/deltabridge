@@ -72,17 +72,18 @@ class DeltaTableClient:
     def load_as_delta(self) -> DeltaTable:
         """Load a Delta table.
 
-        Return the cached DeltaTable.
-        Concurrent use requires external synchronization.
+        Return the cached DeltaTable without acquiring the client lock.
+        Delta-rs synchronizes native operations, but concurrent use of this
+        client requires a shared external lock covering both load methods
+        and the entire use of returned DeltaTable objects.
 
         Returns
         -------
         DeltaTable
             A DeltaTable object representing the loaded table.
         """
-        with self._refresh_lock:
-            self._refresh_table()
-            return self._delta_table
+        self._refresh_table()
+        return self._delta_table
 
     def load_as_polars(
         self,
@@ -90,6 +91,10 @@ class DeltaTableClient:
         | None = None,
     ) -> pl.LazyFrame:
         """Load a Delta table, with optional partition filtering.
+
+        Concurrent Polars loads are protected by the client lock. Mixing
+        these with load_as_delta() on the same client requires a shared
+        external lock because load_as_delta() does not acquire that lock.
 
         Parameters
         ----------

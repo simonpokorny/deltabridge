@@ -24,17 +24,29 @@ uv add deltabridge
 
 ### Concurrency and thread safety
 
-Both methods refresh the cached Delta table before returning.
+The table below describes what happens when two threads call the same load
+method on the same `table_client` instance. Both methods refresh the table
+metadata before returning.
 
-* `load_as_polars()` supports concurrent reads on the same client. It captures
-  the current schema and file list before returning a LazyFrame, which reads
-  those files on `collect()`. Later client loads capture a refreshed snapshot
-  without changing previously returned LazyFrames.
-* `load_as_delta()` returns the shared, cached DeltaTable to preserve incremental
-  transaction-log loading. Calling it in every request refreshes the metadata
-  but does not create an independent snapshot: another request can update the
-  same object while it is in use. Concurrent use requires a shared external
-  lock covering both client loads and the entire use of the returned table.
+| On the same table client | `load_as_polars()` | `load_as_delta()` |
+| --- | :---: | :---: |
+| Refresh and snapshot construction protected by the client lock | ✅ | ❌ |
+| Safe concurrent reads without an external lock | ✅ | ❌ |
+| Returned snapshot stays unchanged by later loads | ✅ | ❌ |
+
+`load_as_polars()` uses the client lock to keep refresh and snapshot construction
+together. It returns a LazyFrame with its own snapshot of the schema and files.
+Later loads do not change what that LazyFrame reads on `collect()`.
+
+`load_as_delta()` returns the shared cached DeltaTable without acquiring the
+client lock. Delta-rs has a native mutex for individual operations, but it does
+not keep a sequence of metadata reads on the same version or protect the client's
+replacement of the cached table when credentials change.
+
+When using `load_as_delta()` concurrently, including alongside
+`load_as_polars()`, protect **both load methods and the entire use of any returned
+DeltaTable** with the same external lock. Otherwise a Delta load can refresh the
+shared table while a Polars load is still constructing its snapshot.
 
 ### Examples
 
