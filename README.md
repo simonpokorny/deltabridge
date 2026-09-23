@@ -24,21 +24,9 @@ uv add deltabridge
 
 ### Concurrency and thread safety
 
-When two threads share the same `table_client`:
-
-| | `load_as_polars()` | `load_as_delta()` |
-| --- | :---: | :---: |
-| Concurrent reads using only this method need no external lock | ✅ | ❌ |
-| Later loads leave the returned result unchanged | ✅ | ❌ |
-
 Both methods refresh metadata before returning. `load_as_polars()` returns a
 LazyFrame with a fixed schema and file list. `load_as_delta()` returns the shared
 cached DeltaTable, which later loads can change.
-
-For concurrent use of `load_as_delta()`, including alongside `load_as_polars()`,
-use **one shared external lock around both load methods and the entire use of
-returned DeltaTable objects**. Delta-rs locks individual operations, but does not
-keep a whole sequence of calls on the same version.
 
 ### Examples
 
