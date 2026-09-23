@@ -24,29 +24,21 @@ uv add deltabridge
 
 ### Concurrency and thread safety
 
-The table below describes what happens when two threads call the same load
-method on the same `table_client` instance. Both methods refresh the table
-metadata before returning.
+When two threads share the same `table_client`:
 
-| On the same table client | `load_as_polars()` | `load_as_delta()` |
+| | `load_as_polars()` | `load_as_delta()` |
 | --- | :---: | :---: |
-| Refresh and snapshot construction protected by the client lock | ✅ | ❌ |
-| Safe concurrent reads without an external lock | ✅ | ❌ |
-| Returned snapshot stays unchanged by later loads | ✅ | ❌ |
+| Concurrent reads using only this method need no external lock | ✅ | ❌ |
+| Later loads leave the returned result unchanged | ✅ | ❌ |
 
-`load_as_polars()` uses the client lock to keep refresh and snapshot construction
-together. It returns a LazyFrame with its own snapshot of the schema and files.
-Later loads do not change what that LazyFrame reads on `collect()`.
+Both methods refresh metadata before returning. `load_as_polars()` returns a
+LazyFrame with a fixed schema and file list. `load_as_delta()` returns the shared
+cached DeltaTable, which later loads can change.
 
-`load_as_delta()` returns the shared cached DeltaTable without acquiring the
-client lock. Delta-rs has a native mutex for individual operations, but it does
-not keep a sequence of metadata reads on the same version or protect the client's
-replacement of the cached table when credentials change.
-
-When using `load_as_delta()` concurrently, including alongside
-`load_as_polars()`, protect **both load methods and the entire use of any returned
-DeltaTable** with the same external lock. Otherwise a Delta load can refresh the
-shared table while a Polars load is still constructing its snapshot.
+For concurrent use of `load_as_delta()`, including alongside `load_as_polars()`,
+use **one shared external lock around both load methods and the entire use of
+returned DeltaTable objects**. Delta-rs locks individual operations, but does not
+keep a whole sequence of calls on the same version.
 
 ### Examples
 
