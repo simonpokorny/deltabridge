@@ -19,6 +19,8 @@ source .venv/bin/activate
 
 You can also use `uv run` to run commands in the virtual environment without activating it in the current shell, e.g. `uv run pytest`.
 
+The deletion vector tests write their tables with Spark ([pysparkdt](https://github.com/datamole-ai/pysparkdt)), which needs Java 17 or later.
+
 
 ### Test the newly implemented changes
 Create unit tests by creating a Python script in the folder `tests` prefixed with `test_`.

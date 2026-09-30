@@ -91,6 +91,7 @@ SQL warehouse or cluster:
 * Use the table's storage location (in Azure Blob Storage) as the table URI.
     * You can find it in the Databricks Catalog Explorer UI under *Details* of the table.
 * The reading identity needs at least the *Storage Blob Data Reader* permission on the storage location (storage account/container).
+* Tables with deletion vectors can be read, but not with `partition_filter`. Filter the returned `LazyFrame` instead.
 
 ## Writing to Delta tables
 

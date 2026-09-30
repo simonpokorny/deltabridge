@@ -6,6 +6,10 @@ from typing import Any, Callable
 import polars as pl
 from deltalake import DeltaTable
 from deltalake.exceptions import DeltaProtocolError
+from deltalake.table import (
+    MAX_SUPPORTED_READER_VERSION,
+    SUPPORTED_READER_FEATURES,
+)
 
 
 class PartitionFilterOperator(StrEnum):
@@ -86,6 +90,9 @@ class DeltaTableClient:
     ) -> pl.LazyFrame:
         """Load a Delta table, with optional partition filtering.
 
+        Tables with deletion vectors can be read only without
+        ``partition_filter``.
+
         Parameters
         ----------
         partition_filter
@@ -107,28 +114,45 @@ class DeltaTableClient:
         ValueError
             If an invalid partition filter operator is provided.
         deltalake.exceptions.DeltaProtocolError
-            If the table uses column mapping.
+            If the table uses column mapping or another unsupported Delta
+            feature, or deletion vectors with ``partition_filter``.
         """
         table = self.load_as_delta()
+        protocol = table.protocol()
 
         # deltalake>=1.6.4 no longer rejects reader version 2 (column mapping)
         # and reads the columns as nulls (delta-io/delta-rs#4712)
-        if table.protocol().min_reader_version == 2:
+        if protocol.min_reader_version == 2:
             raise DeltaProtocolError(
                 'The table uses column mapping (reader version 2), '
                 'which cannot be read.'
             )
 
-        # Check if the table is partitioned
         if partition_filter:
             for _, operator, _ in partition_filter:
                 # Raises ValueError if invalid
                 PartitionFilterOperator(operator)
-            pyarrow_options = {'partitions': partition_filter}
-        else:
-            # No partition filter for non-partitioned tables
-            pyarrow_options = {}
+            # pyarrow prunes partitions before listing files (the native
+            # reader does not, pola-rs/polars#20998), but rejects tables with
+            # deletion vectors
+            return pl.scan_delta(
+                source=table,
+                use_pyarrow=True,
+                pyarrow_options={'partitions': partition_filter},
+            )
 
-        return pl.scan_delta(
-            source=table, use_pyarrow=True, pyarrow_options=pyarrow_options
+        # pl.scan_delta skips its protocol check when given a DeltaTable
+        features = set(protocol.reader_features or [])
+        unsupported = (
+            features - SUPPORTED_READER_FEATURES - {'deletionVectors'}
         )
+        if (
+            protocol.min_reader_version > MAX_SUPPORTED_READER_VERSION
+            or unsupported
+        ):
+            raise DeltaProtocolError(
+                'The table requires reader version '
+                f'{protocol.min_reader_version} with reader features '
+                f'{sorted(features)}, which cannot be read.'
+            )
+        return pl.scan_delta(source=table)

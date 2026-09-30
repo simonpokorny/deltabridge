@@ -8,6 +8,7 @@ from deltalake import DeltaTable
 from deltalake.exceptions import DeltaProtocolError
 from deltalake.writer import write_deltalake
 from polars.testing import assert_frame_equal
+from pysparkdt import reinit_local_metastore, spark_base
 
 from deltabridge import PartitionFilterOperator
 from deltabridge.client import DeltaTableClient
@@ -47,6 +48,32 @@ def column_mapping_table_uri(sample_df):
             configuration={'delta.columnMapping.mode': 'name'},
         )
         yield tmpdir
+
+
+@pytest.fixture(scope='module')
+def spark():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield from spark_base(
+            Path(tmpdir) / 'metastore',
+            # Keep the naive datetimes of sample_df naive
+            spark_config={'spark.sql.timestampType': 'TIMESTAMP_NTZ'},
+        )
+
+
+@pytest.fixture
+def deletion_vector_table_uri(spark, sample_df):
+    reinit_local_metastore(
+        spark,
+        table_factories={
+            # A single file, so that the delete writes a deletion vector
+            # instead of removing whole files
+            'sample': lambda spark: spark.createDataFrame(
+                sample_df.to_pandas()
+            ).coalesce(1),
+        },
+    )
+    spark.sql('DELETE FROM sample WHERE id = 2')
+    return spark.sql('DESCRIBE DETAIL sample').first().location
 
 
 def test_load_as_delta(temp_delta_table_uri):
@@ -145,6 +172,49 @@ def test_load_as_polars_with_column_mapping(column_mapping_table_uri):
     # Without the protocol check, the columns would be read as nulls
     delta_table_client = DeltaTableClient(
         table_uri=column_mapping_table_uri,
+        storage_options_fn=lambda: {},
+    )
+    with pytest.raises(DeltaProtocolError):
+        delta_table_client.load_as_polars()
+
+
+def test_load_as_polars_with_deletion_vectors(
+    deletion_vector_table_uri, sample_df
+):
+    delta_table_client = DeltaTableClient(
+        table_uri=deletion_vector_table_uri,
+        storage_options_fn=lambda: {},
+    )
+    assert_frame_equal(
+        delta_table_client.load_as_polars().sort('id', 'value').collect(),
+        sample_df.filter(pl.col('id') != 2),
+    )
+
+
+def test_load_as_polars_partition_filter_with_deletion_vectors(
+    deletion_vector_table_uri,
+):
+    delta_table_client = DeltaTableClient(
+        table_uri=deletion_vector_table_uri,
+        storage_options_fn=lambda: {},
+    )
+    with pytest.raises(DeltaProtocolError):
+        delta_table_client.load_as_polars(
+            partition_filter=[('id', '=', '1')],
+        ).collect()
+
+
+def test_load_as_polars_with_deletion_vectors_and_column_mapping(
+    spark, deletion_vector_table_uri
+):
+    spark.sql(
+        'ALTER TABLE sample SET TBLPROPERTIES '
+        "('delta.columnMapping.mode' = 'name')"
+    )
+    spark.sql('ALTER TABLE sample RENAME COLUMN value TO renamed_value')
+    # Without the protocol check, renamed_value would be read as nulls
+    delta_table_client = DeltaTableClient(
+        table_uri=deletion_vector_table_uri,
         storage_options_fn=lambda: {},
     )
     with pytest.raises(DeltaProtocolError):
